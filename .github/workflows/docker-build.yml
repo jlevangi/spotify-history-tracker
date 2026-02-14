@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: jlevangi/spotify-history-tracker
+  IMAGE_NAME: jlevangie/spotify-history-tracker
 
 jobs:
   build-and-push:
