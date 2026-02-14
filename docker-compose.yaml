@@ -1,14 +1,12 @@
-version: "3.8"
-
 services:
   spotify-history-tracker:
     build: .
+    image: ${IMAGE_NAME}
     container_name: spotify-history-tracker
+    env_file:
+      - ./.env
     environment:
-      - SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}
-      - SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}
-      - SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}
       - OUTPUT_DIR=/app/output
     volumes:
-      - ./output:/app/output
+      - ${OUTPUT_HOST_DIR}:/app/output
       - ./.cache:/app/.cache

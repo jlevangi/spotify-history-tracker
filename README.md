@@ -37,19 +37,42 @@ python3 main.py --extended-history
 # Docker
 
 - Copy `.env.sample` to `.env` and fill in Spotify credentials.
+- Set `IMAGE_NAME` to your Docker Hub image tag (for example `yourname/spotify-history-tracker:latest`).
+- Set `OUTPUT_HOST_DIR` to where files should be written on your host.
+  - In WSL/Linux, this must be an absolute Linux path (for example `/mnt/c/Users/...`).
 - Build the container:
 
 ```
-docker-compose build
+docker compose build
 ```
 
 - Run the container:
 
 ```
-docker-compose up
+docker compose up
 ```
 
-- Output files are written to `./output` on your host machine.
+- Output files are written directly to `OUTPUT_HOST_DIR` on your host machine.
+
+## Push To Docker Hub
+
+```
+docker login
+docker compose build
+docker compose push
+```
+
+## Run Elsewhere (Without Source Code)
+
+Use an env file on the target host with Spotify credentials and set `OUTPUT_HOST_DIR` to a host path.
+
+```
+docker run --rm \
+  --env-file /path/to/.env \
+  -e OUTPUT_DIR=/app/output \
+  -v /absolute/host/output/path:/app/output \
+  yourname/spotify-history-tracker:latest
+```
 
 # Spotify Data and Credentials
 
