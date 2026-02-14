@@ -1,230 +1,114 @@
 import os
 import json
+from datetime import datetime, timedelta, timezone
+
 import spotipy
-import argparse
+from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyOAuth
-from db import close_connection, query_db
+
 from logger import logger
-from models import (
-    insert_streaming_history,
-    get_object_by_id,
-    is_streaming_history_added,
-    get_new_ids,
-)
-from helpers import startup_database, batch_generator
-from flows import flow_insert_all_from_albums, flow_insert_all_from_tracks
-import time
+
+load_dotenv()
+
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", ".")
 
 
-def load_extended_history(dir: str):
-    """
-    Load all *.json inside a directory into a single list of dictionaries.
-    """
-    data = []
+def fetch_recently_played(sp):
+    """Fetch recently played tracks from the last 3 days."""
+    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
+    after_ms = int(three_days_ago.timestamp() * 1000)
 
-    for filename in os.listdir(dir):
-        if filename.endswith(".json"):
-            with open(os.path.join(dir, filename)) as f:
-                data.extend(json.load(f))
-
-    return data
+    logger.info("Fetching recently played tracks from Spotify")
+    results = sp.current_user_recently_played(limit=50, after=after_ms)
+    items = results.get("items", [])
+    logger.info(f"Fetched {len(items)} tracks")
+    return items
 
 
-def add_extended_history(sp: spotipy.Spotify):
-    extended_history = load_extended_history("extended_history")
-    logger.info(
-        f"Loaded {len(extended_history)} items from extended history, adding to database. This may take a while."
-    )
+def convert_to_extended_format(items, username):
+    """Convert Spotify API recently played items to the extended streaming history format."""
+    records = []
+    for item in items:
+        track = item.get("track", {})
+        album = track.get("album", {})
+        artists = album.get("artists", [])
+        artist_name = artists[0]["name"] if artists else None
 
-    # First step is to make sure all songs were added to the database
-    # So I will do an outer batch of 10 in 10 songs until I found 40-50 songs
-    # that are not in the database.
-    # Then I will request them all until I finished all extended history.
-    outer_batch = []
-    for inner_batch in batch_generator(extended_history, 10):
-        ids = []
-        for item in inner_batch:
-            try:
-                track_id = item.get("spotify_track_uri").replace("spotify:track:", "")
-                ids.append(track_id)
-            except Exception:
-                logger.warning("Failed to get track id, likely a podcast.")
-                continue
+        # Strip milliseconds from timestamp: "2024-01-15T12:34:56.789Z" -> "2024-01-15T12:34:56Z"
+        played_at = item.get("played_at", "")
+        if "." in played_at:
+            played_at = played_at.split(".")[0] + "Z"
 
-        outer_batch.extend(get_new_ids("tracks", ids))
-        if len(outer_batch) >= 40:
-            # Send to the flow
-            flow_insert_all_from_tracks(outer_batch, sp)
-            outer_batch = []
-            # For good measure I will sleep a bit
-            time.sleep(3)
-
-    # Only now that I will go over the extended history and add the streaming history
-    for data in extended_history:
-        try:
-            track_id = data.get("spotify_track_uri").replace("spotify:track:", "")
-        except Exception:
-            # This is just a podcast, I've logged about it above, here I just
-            # ignore.
-            continue
-
-        if is_streaming_history_added(data.get("ts"), track_id):
-            continue
-
-        try:
-            logger.debug(
-                f"Inserting streaming history for track {track_id} at {data.get('ts')}"
-            )
-            insert_streaming_history(
-                data.get("ts"),
-                data.get("ms_played"),
-                track_id,
-                # Context is always None when coming from extended history
-                None,
-                data.get("reason_start"),
-                data.get("reason_end"),
-                data.get("skipped"),
-                data.get("shuffle"),
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to insert streaming history for track {track_id}. WILL TRY AGAIN: {e}"
-            )
-            # I will try again by actually inserting the track
-            try:
-                flow_insert_all_from_tracks([track_id], sp)
-                insert_streaming_history(
-                    data.get("ts"),
-                    data.get("ms_played"),
-                    track_id,
-                    # Context is always None when coming from extended history
-                    None,
-                    data.get("reason_start"),
-                    data.get("reason_end"),
-                    data.get("skipped"),
-                    data.get("shuffle"),
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to insert streaming history for track {track_id} even after trying to insert it: {e}"
-                )
-
-    # Merge possible "duplicates" between the extended history and the recently played
-    # Comments for this are in the fix_history_merge.sql file
-    try:
-        with open("fix_history_merge.sql") as f:
-            query = f.read()
-            query_db(query, commit=True)
-    except Exception as e:
-        logger.error(f"Failed to merge history: {e}")
+        records.append({
+            "ts": played_at,
+            "username": username,
+            "platform": None,
+            "ms_played": track.get("duration_ms"),
+            "conn_country": None,
+            "ip_addr_decrypted": None,
+            "user_agent_decrypted": None,
+            "master_metadata_track_name": track.get("name"),
+            "master_metadata_album_artist_name": artist_name,
+            "master_metadata_album_album_name": album.get("name"),
+            "spotify_track_uri": track.get("uri"),
+            "episode_name": None,
+            "episode_show_name": None,
+            "spotify_episode_uri": None,
+            "reason_start": None,
+            "reason_end": None,
+            "shuffle": None,
+            "skipped": None,
+            "offline": None,
+            "offline_timestamp": None,
+            "incognito_mode": None,
+        })
+    return records
 
 
-def add_recently_played(sp: spotipy.Spotify):
-    """
-    Queries Spotify for the user's recently played tracks and inserts them into the database.
-    """
-    logger.info("Querying recently played tracks from Spotify")
-    recently_played = sp.current_user_recently_played(limit=50)
+def write_output(records):
+    """Write records to a daily JSON file, merging and deduplicating if the file already exists."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"Streaming_History_Audio_{today}.json"
+    filepath = os.path.join(OUTPUT_DIR, filename)
 
-    # Find all albums that are not in the database
-    album_ids = set()
+    existing = []
+    if os.path.exists(filepath):
+        logger.info(f"File {filename} already exists, will merge and deduplicate")
+        with open(filepath, "r", encoding="utf-8") as f:
+            existing = json.load(f)
 
-    for track in recently_played.get("items", []):
-        album_id = track.get("track", {}).get("album", {}).get("id")
-        if album_id and not get_object_by_id(album_id, "albums"):
-            album_ids.add(album_id)
+    # Merge and deduplicate by (ts, spotify_track_uri)
+    seen = set()
+    merged = []
+    for record in existing + records:
+        key = (record.get("ts"), record.get("spotify_track_uri"))
+        if key not in seen:
+            seen.add(key)
+            merged.append(record)
 
-    # Insert all albums that are not in the database
-    # Batch it becuause there is a chance of being more than 20
-    for batch in batch_generator(list(album_ids), 20):
-        flow_insert_all_from_albums(batch, sp)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
 
-    # Now I can insert the streaming history since I know I have
-    # the track in the database.
-    for track in recently_played.get("items", []):
-        track_id = track.get("track", {}).get("id")
-
-        if is_streaming_history_added(track.get("played_at"), track_id):
-            continue
-
-        try:
-            logger.debug(
-                f"Inserting streaming history for track {track_id} at {track.get('played_at')}"
-            )
-            insert_streaming_history(
-                track.get("played_at"),
-                track.get("track", {}).get("duration_ms"),
-                track_id,
-                track.get("context", {}).get("type"),
-                # The rest here is always None when coming from recently played
-                None,
-                None,
-                None,
-                None,
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to insert streaming history for track {track_id}: {e}"
-            )
+    new_count = len(merged) - len(existing)
+    logger.info(f"Wrote {len(merged)} records to {filename} ({new_count} new)")
 
 
 def main():
-
-    try:
-        startup_database()
-    except Exception as e:
-        logger.fatal(f"Failed to start database: {e}")
-        exit(1)
-
-    parser = argparse.ArgumentParser(
-        description="CLI tool for Spotify data management."
-    )
-
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode for logging",
-    )
-    parser.add_argument(
-        "--recently-played",
-        action="store_true",
-        help="Fetch recently played tracks",
-    )
-    parser.add_argument(
-        "--extended-history",
-        action="store_true",
-        help="Load extended streaming history, takes a while",
-    )
-
     scope = "user-read-recently-played"
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
 
-    # Parse the arguments
-    args = parser.parse_args()
+    username = sp.current_user().get("id", "unknown")
+    logger.info(f"Authenticated as {username}")
 
-    # If nothing is passed, print help
-    if not any(vars(args).values()):
-        parser.print_help()
-        exit(1)
+    items = fetch_recently_played(sp)
+    if not items:
+        logger.info("No recently played tracks found")
+        return
 
-    # Set the log level
-    if args.debug:
-        logger.setLevel("DEBUG")
-
-    if args.extended_history or args.recently_played:
-        # Log that it started
-        logger.info("Starting...")
-
-        if args.extended_history:
-            add_extended_history(sp)
-
-        if args.recently_played:
-            add_recently_played(sp)
-
-        logger.info("Finished")
-
-    # Close the database connection
-    close_connection()
+    records = convert_to_extended_format(items, username)
+    write_output(records)
+    logger.info("Done")
 
 
 if __name__ == "__main__":
