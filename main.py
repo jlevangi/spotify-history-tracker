@@ -56,8 +56,9 @@ def convert_to_extended_format(items):
             "audiobook_uri": None,
             "audiobook_chapter_title": None,
             "audiobook_chapter_uri": None,
-            "reason_start": "unknown",
-            "reason_end": "unknown",
+            # Koito expects Spotify-style reason enums; "unknown" is not valid for reason_start.
+            "reason_start": "playbtn",
+            "reason_end": "trackdone",
             "shuffle": False,
             "skipped": False,
             "offline": False,
