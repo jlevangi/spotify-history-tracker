@@ -40,25 +40,27 @@ python3 main.py --extended-history
 - Set `IMAGE_NAME` to your Docker Hub image tag (for example `yourname/spotify-history-tracker:latest`).
 - Set `OUTPUT_HOST_DIR` to where files should be written on your host.
   - In WSL/Linux, this must be an absolute Linux path (for example `/mnt/c/Users/...`).
-- Build the container:
+- Run the prebuilt image from Docker Hub:
 
 ```
-docker compose build
+docker compose pull
+docker compose up -d
 ```
-
-- Run the container:
-
-```
-docker compose up
-```
-
 - Output files are written directly to `OUTPUT_HOST_DIR` on your host machine.
+
+## Build Locally (Optional)
+
+Use the separate build compose file:
+
+```
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml build
+```
 
 ## Push To Docker Hub
 
 ```
 docker login
-docker compose build
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml build
 docker compose push
 ```
 

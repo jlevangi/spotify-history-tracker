@@ -1,6 +1,5 @@
 services:
   spotify-history-tracker:
-    build: .
     image: ${IMAGE_NAME}
     container_name: spotify-history-tracker
     env_file:
