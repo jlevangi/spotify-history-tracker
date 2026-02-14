@@ -25,7 +25,7 @@ def fetch_recently_played(sp):
     return items
 
 
-def convert_to_extended_format(items, username):
+def convert_to_extended_format(items):
     """Convert Spotify API recently played items to the extended streaming history format."""
     records = []
     for item in items:
@@ -41,12 +41,10 @@ def convert_to_extended_format(items, username):
 
         records.append({
             "ts": played_at,
-            "username": username,
-            "platform": None,
+            "platform": "unknown",
             "ms_played": track.get("duration_ms"),
-            "conn_country": None,
-            "ip_addr_decrypted": None,
-            "user_agent_decrypted": None,
+            "conn_country": "",
+            "ip_addr": "",
             "master_metadata_track_name": track.get("name"),
             "master_metadata_album_artist_name": artist_name,
             "master_metadata_album_album_name": album.get("name"),
@@ -54,13 +52,17 @@ def convert_to_extended_format(items, username):
             "episode_name": None,
             "episode_show_name": None,
             "spotify_episode_uri": None,
-            "reason_start": None,
-            "reason_end": None,
-            "shuffle": None,
-            "skipped": None,
-            "offline": None,
+            "audiobook_title": None,
+            "audiobook_uri": None,
+            "audiobook_chapter_title": None,
+            "audiobook_chapter_uri": None,
+            "reason_start": "unknown",
+            "reason_end": "unknown",
+            "shuffle": False,
+            "skipped": False,
+            "offline": False,
             "offline_timestamp": None,
-            "incognito_mode": None,
+            "incognito_mode": False,
         })
     return records
 
@@ -106,7 +108,7 @@ def main():
         logger.info("No recently played tracks found")
         return
 
-    records = convert_to_extended_format(items, username)
+    records = convert_to_extended_format(items)
     write_output(records)
     logger.info("Done")
 
