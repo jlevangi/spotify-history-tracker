@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+.git
+.venv
+venv
+venv_win
+.github
+.cache
+.env
+spotify.log
+output

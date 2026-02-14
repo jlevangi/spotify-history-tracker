@@ -34,6 +34,23 @@ python3 main.py --extended-history
 
 **IMPORTANT**: Requesting a large streaming history can take a lot of time and get your API key blocked for a while. If you're requesting data for a large period of time it might be necessary to run the script over multiple days.
 
+# Docker
+
+- Copy `.env.sample` to `.env` and fill in Spotify credentials.
+- Build the container:
+
+```
+docker-compose build
+```
+
+- Run the container:
+
+```
+docker-compose up
+```
+
+- Output files are written to `./output` on your host machine.
+
 # Spotify Data and Credentials
 
 - You can request your API Keys in the [Spotify Developer Dashboard](https://developer.spotify.com/)
