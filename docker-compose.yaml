@@ -6,6 +6,8 @@ services:
       - ./.env
     environment:
       - OUTPUT_DIR=/app/output
+    ports:
+      - "${SPOTIFY_CALLBACK_PORT:-8888}:${SPOTIFY_CALLBACK_PORT:-8888}"
     volumes:
       - ${OUTPUT_HOST_DIR}:/app/output
       - ./.cache:/app/.cache

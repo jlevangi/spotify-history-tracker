@@ -2,10 +2,9 @@ import os
 import json
 from datetime import datetime, timedelta, timezone
 
-import spotipy
 from dotenv import load_dotenv
-from spotipy.oauth2 import SpotifyOAuth
 
+from auth import get_spotify_client
 from logger import logger
 
 load_dotenv()
@@ -98,8 +97,7 @@ def write_output(records):
 
 
 def main():
-    scope = "user-read-recently-played"
-    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
+    sp = get_spotify_client()
 
     username = sp.current_user().get("id", "unknown")
     logger.info(f"Authenticated as {username}")
