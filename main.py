@@ -1,116 +1,84 @@
-import os
+import base64
+import calendar
 import json
-from datetime import datetime, timedelta, timezone
-
-from dotenv import load_dotenv
-
-from auth import get_spotify_client
-from logger import logger
-
-load_dotenv()
-
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", ".")
+import os
+import time
+from urllib import parse, request
 
 
-def fetch_recently_played(sp):
-    """Fetch recently played tracks from the last 3 days."""
-    three_days_ago = datetime.now(timezone.utc) - timedelta(days=3)
-    after_ms = int(three_days_ago.timestamp() * 1000)
-
-    logger.info("Fetching recently played tracks from Spotify")
-    results = sp.current_user_recently_played(limit=50, after=after_ms)
-    items = results.get("items", [])
-    logger.info(f"Fetched {len(items)} tracks")
-    return items
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_RECENTLY_PLAYED_URL = "https://api.spotify.com/v1/me/player/recently-played"
 
 
-def convert_to_extended_format(items):
-    """Convert Spotify API recently played items to the extended streaming history format."""
-    records = []
-    for item in items:
-        track = item.get("track", {})
-        album = track.get("album", {})
-        artists = album.get("artists", [])
-        artist_name = artists[0]["name"] if artists else None
-
-        # Strip milliseconds from timestamp: "2024-01-15T12:34:56.789Z" -> "2024-01-15T12:34:56Z"
-        played_at = item.get("played_at", "")
-        if "." in played_at:
-            played_at = played_at.split(".")[0] + "Z"
-
-        records.append({
-            "ts": played_at,
-            "platform": "unknown",
-            "ms_played": track.get("duration_ms"),
-            "conn_country": "",
-            "ip_addr": "",
-            "master_metadata_track_name": track.get("name"),
-            "master_metadata_album_artist_name": artist_name,
-            "master_metadata_album_album_name": album.get("name"),
-            "spotify_track_uri": track.get("uri"),
-            "episode_name": None,
-            "episode_show_name": None,
-            "spotify_episode_uri": None,
-            "audiobook_title": None,
-            "audiobook_uri": None,
-            "audiobook_chapter_title": None,
-            "audiobook_chapter_uri": None,
-            # Koito expects Spotify-style reason enums; "unknown" is not valid for reason_start.
-            "reason_start": "playbtn",
-            "reason_end": "trackdone",
-            "shuffle": False,
-            "skipped": False,
-            "offline": False,
-            "offline_timestamp": None,
-            "incognito_mode": False,
-        })
-    return records
+def spotify_access_token():
+    credentials = base64.b64encode(
+        f"{os.environ['SPOTIFY_CLIENT_ID']}:{os.environ['SPOTIFY_CLIENT_SECRET']}".encode()
+    ).decode()
+    body = parse.urlencode(
+        {"grant_type": "refresh_token", "refresh_token": os.environ["SPOTIFY_REFRESH_TOKEN"]}
+    ).encode()
+    req = request.Request(
+        SPOTIFY_TOKEN_URL,
+        data=body,
+        headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with request.urlopen(req) as response:
+        return json.load(response)["access_token"]
 
 
-def write_output(records):
-    """Write records to a daily JSON file, merging and deduplicating if the file already exists."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"Streaming_History_Audio_{today}.json"
-    filepath = os.path.join(OUTPUT_DIR, filename)
-
-    existing = []
-    if os.path.exists(filepath):
-        logger.info(f"File {filename} already exists, will merge and deduplicate")
-        with open(filepath, "r", encoding="utf-8") as f:
-            existing = json.load(f)
-
-    # Merge and deduplicate by (ts, spotify_track_uri)
-    seen = set()
-    merged = []
-    for record in existing + records:
-        key = (record.get("ts"), record.get("spotify_track_uri"))
-        if key not in seen:
-            seen.add(key)
-            merged.append(record)
-
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2, ensure_ascii=False)
-
-    new_count = len(merged) - len(existing)
-    logger.info(f"Wrote {len(merged)} records to {filename} ({new_count} new)")
+def recent_listens(access_token):
+    after_ms = int((time.time() - 20 * 60) * 1000)
+    req = request.Request(
+        f"{SPOTIFY_RECENTLY_PLAYED_URL}?{parse.urlencode({'limit': 50, 'after': after_ms})}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with request.urlopen(req) as response:
+        return json.load(response).get("items", [])
 
 
-def main():
-    sp = get_spotify_client()
+def koito_payload(items):
+    return {
+        "listen_type": "import",
+        "payload": [
+            {
+                "listened_at": int(parse_time(item["played_at"])),
+                "track_metadata": {
+                    "artist_name": item["track"]["artists"][0]["name"],
+                    "track_name": item["track"]["name"],
+                    "release_name": item["track"]["album"]["name"],
+                    "additional_info": {
+                        "duration_ms": item["track"]["duration_ms"],
+                        "submission_client": "spotify-history-tracker",
+                    },
+                },
+            }
+            for item in items
+        ],
+    }
 
-    username = sp.current_user().get("id", "unknown")
-    logger.info(f"Authenticated as {username}")
 
-    items = fetch_recently_played(sp)
+def parse_time(played_at):
+    return calendar.timegm(time.strptime(played_at.split(".")[0], "%Y-%m-%dT%H:%M:%S"))
+
+
+def submit_to_koito(items):
     if not items:
-        logger.info("No recently played tracks found")
+        print("Spotify returned no recent listens.")
         return
-
-    records = convert_to_extended_format(items)
-    write_output(records)
-    logger.info("Done")
+    req = request.Request(
+        os.environ["KOITO_URL"].rstrip("/") + "/apis/listenbrainz/1/submit-listens",
+        data=json.dumps(koito_payload(items)).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Token {os.environ['KOITO_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+    )
+    with request.urlopen(req) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Koito returned HTTP {response.status}")
+    print(f"Submitted {len(items)} Spotify listens to Koito.")
 
 
 if __name__ == "__main__":
-    main()
+    submit_to_koito(recent_listens(spotify_access_token()))
