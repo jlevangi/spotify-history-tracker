@@ -13,10 +13,13 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
+from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 from logger import logger
+
+load_dotenv()
 
 # How long (seconds) to wait for the user to complete browser auth.
 AUTH_TIMEOUT = int(os.environ.get("SPOTIFY_AUTH_TIMEOUT", "300"))
@@ -67,12 +70,16 @@ def _run_callback_server(auth_manager: SpotifyOAuth) -> str | None:
             # Suppress default stderr logging from BaseHTTPRequestHandler
             pass
 
-    server = HTTPServer(("0.0.0.0", port), CallbackHandler)
-    server.timeout = AUTH_TIMEOUT
+    try:
+        server = HTTPServer(("0.0.0.0", port), CallbackHandler)
+        server.timeout = AUTH_TIMEOUT
 
-    # Handle exactly one request (the callback redirect).
-    server.handle_request()
-    server.server_close()
+        # Handle exactly one request (the callback redirect).
+        server.handle_request()
+        server.server_close()
+    except OSError as e:
+        logger.warning(f"Could not bind callback server on port {port}: {e}")
+        return None
 
     return result["url"]
 
@@ -135,19 +142,33 @@ def get_spotify_client(scope: str = "user-read-recently-played") -> spotipy.Spot
     callback_url = _run_callback_server(auth_manager)
 
     if callback_url is None:
-        logger.error(
-            "Authentication timed out. No callback received within "
-            f"{AUTH_TIMEOUT}s. Exiting."
-        )
+        if sys.stdin.isatty():
+            print("\nEnter the URL you were redirected to (e.g. http://127.0.0.1:8888/callback?code=...):")
+            callback_url = input().strip()
+        else:
+            logger.error(
+                "Authentication timed out or callback unavailable in non-interactive environment. Exiting."
+            )
+            sys.exit(1)
+
+    if not callback_url:
+        logger.error("No callback URL provided. Exiting.")
         sys.exit(1)
 
     # Exchange the authorization code for an access token.
     code = auth_manager.parse_response_code(callback_url)
     try:
-        auth_manager.get_access_token(code, as_dict=False)
+        auth_manager.get_access_token(code, as_dict=False, check_cache=False)
     except Exception as e:
         logger.error(f"Failed to obtain access token: {e}")
         sys.exit(1)
 
     logger.info("Authentication successful — token cached for future runs")
     return spotipy.Spotify(auth_manager=auth_manager)
+
+
+if __name__ == "__main__":
+    client = get_spotify_client()
+    user = client.current_user()
+    print(f"\nAuthentication verified! Logged in as: {user.get('id', 'unknown')}")
+
